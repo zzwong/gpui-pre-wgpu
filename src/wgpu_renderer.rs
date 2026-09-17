@@ -269,37 +269,25 @@ impl WgpuRenderer {
             .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
 
-        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            // Fall back to the display handle already provided via InstanceDescriptor::display.
-            raw_display_handle: None,
-            raw_window_handle: window_handle.as_raw(),
-        };
-
-        // Use the existing context's instance if available, otherwise create a new one.
-        // The surface must be created with the same instance that will be used for
-        // adapter selection, otherwise wgpu will panic.
-        let instance = gpu_context
-            .borrow()
-            .as_ref()
-            .map(|ctx| ctx.instance.clone())
-            .unwrap_or_else(|| WgpuContext::instance(Box::new(window.clone())));
-
-        // Safety: The caller guarantees that the window handle is valid for the
-        // lifetime of this renderer. In practice, the RawWindow struct is created
-        // from the native window handles and the surface is dropped before the window.
-        let surface = unsafe {
-            instance
-                .create_surface_unsafe(target)
-                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
-        };
-
+        // The surface must be created with the same instance that selected the
+        // adapter, otherwise wgpu will panic. The first window tries the backend
+        // candidates in turn; later windows reuse the shared context's instance.
         let mut ctx_ref = gpu_context.borrow_mut();
-        let context = match ctx_ref.as_mut() {
+        let (surface, context) = match ctx_ref.as_mut() {
             Some(context) => {
+                let surface = create_surface(&context.instance, window_handle.as_raw())?;
                 context.check_compatible_with_surface(&surface)?;
-                context
+                (surface, context)
             }
-            None => ctx_ref.insert(WgpuContext::new(instance, &surface, compositor_gpu)?),
+            None => {
+                let (surface, context) = create_context_for_window(
+                    window,
+                    window_handle.as_raw(),
+                    compositor_gpu,
+                    true,
+                )?;
+                (surface, ctx_ref.insert(context))
+            }
         };
 
         let atlas = Arc::new(WgpuAtlas::from_context(context));
@@ -2092,10 +2080,12 @@ impl WgpuRenderer {
             // may need more time to come back (e.g. after suspend/resume).
             std::thread::sleep(std::time::Duration::from_millis(350));
 
-            let instance = WgpuContext::instance(Box::new(window.clone()));
-            let surface = create_surface(&instance, window_handle.as_raw())?;
-            let new_context =
-                WgpuContext::new_rejecting_software(instance, &surface, self.compositor_gpu)?;
+            let (surface, new_context) = create_context_for_window(
+                window,
+                window_handle.as_raw(),
+                self.compositor_gpu,
+                false,
+            )?;
             *gpu_context.borrow_mut() = Some(new_context);
             surface
         } else {
@@ -2135,6 +2125,62 @@ impl WgpuRenderer {
 
 fn instance_range(range: Range<usize>) -> Range<u32> {
     range.start as u32..range.end as u32
+}
+
+/// Creates the surface and GPU context for a window, trying each entry of
+/// [`WgpuContext::backend_candidates`] in order.
+///
+/// Every candidate first gets a chance to provide a hardware adapter, so a
+/// hardware GL adapter still wins over a CPU Vulkan implementation such as
+/// lavapipe. Software adapters are only accepted afterwards, and only when
+/// `allow_software` is set.
+#[cfg(not(target_family = "wasm"))]
+fn create_context_for_window<W>(
+    window: &W,
+    raw_window_handle: raw_window_handle::RawWindowHandle,
+    compositor_gpu: Option<CompositorGpuHint>,
+    allow_software: bool,
+) -> anyhow::Result<(wgpu::Surface<'static>, WgpuContext)>
+where
+    W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
+{
+    let mut errors = Vec::new();
+    let mut without_hardware = Vec::new();
+    for &backends in WgpuContext::backend_candidates() {
+        let instance = WgpuContext::instance_with_backends(Box::new(window.clone()), backends);
+        let surface = match create_surface(&instance, raw_window_handle) {
+            Ok(surface) => surface,
+            Err(e) => {
+                errors.push(format!("{backends:?}: {e:#}"));
+                continue;
+            }
+        };
+        match WgpuContext::new_rejecting_software(instance.clone(), &surface, compositor_gpu) {
+            Ok(context) => return Ok((surface, context)),
+            Err(e) => {
+                log::info!("No hardware {backends:?} adapter can drive the surface: {e:#}");
+                errors.push(format!("{backends:?}: {e:#}"));
+                without_hardware.push((backends, instance, surface));
+            }
+        }
+    }
+    if allow_software {
+        for (backends, instance, surface) in without_hardware {
+            match WgpuContext::new(instance, &surface, compositor_gpu) {
+                Ok(context) => {
+                    log::warn!(
+                        "No hardware GPU adapter found; using a software {backends:?} adapter"
+                    );
+                    return Ok((surface, context));
+                }
+                Err(e) => errors.push(format!("{backends:?} (software): {e:#}")),
+            }
+        }
+    }
+    anyhow::bail!(
+        "No GPU adapter found that can configure the display surface: {}",
+        errors.join("; ")
+    )
 }
 
 #[cfg(not(target_family = "wasm"))]
