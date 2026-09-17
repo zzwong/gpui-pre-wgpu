@@ -439,10 +439,47 @@ impl WgpuContext {
         ))
     }
 
+    /// The backend sets to try, in order, when a window creates the first GPU context.
+    ///
+    /// On Linux and the BSDs, Vulkan is tried on its own first. Putting the GL
+    /// backend in the same instance makes wgpu initialise EGL just to enumerate
+    /// a GL adapter, which loads Mesa's whole GL driver stack (`libEGL`,
+    /// `libgallium`, `libLLVM`, `libgbm`, X11 client libraries) into every
+    /// process even though that adapter is never selected once Vulkan works.
+    /// GL is only initialised when no Vulkan adapter can drive the surface.
     #[cfg(not(target_family = "wasm"))]
+    pub fn backend_candidates() -> &'static [wgpu::Backends] {
+        const VULKAN_THEN_GL: &[wgpu::Backends] = &[wgpu::Backends::VULKAN, wgpu::Backends::GL];
+        const VULKAN_AND_GL: &[wgpu::Backends] =
+            &[wgpu::Backends::VULKAN.union(wgpu::Backends::GL)];
+        if cfg!(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )) {
+            VULKAN_THEN_GL
+        } else {
+            VULKAN_AND_GL
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+<<<<<<< HEAD
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+=======
+    pub fn instance(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> wgpu::Instance {
+        Self::instance_with_backends(display, wgpu::Backends::VULKAN | wgpu::Backends::GL)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn instance_with_backends(
+        display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>,
+        backends: wgpu::Backends,
+    ) -> wgpu::Instance {
+>>>>>>> 0eba156 (gpui_wgpu: try Vulkan before initialising the GL backend on Linux)
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
