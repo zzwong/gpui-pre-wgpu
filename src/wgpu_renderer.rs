@@ -560,8 +560,10 @@ impl WgpuRenderer {
             globals_bind_group,
             path_globals_bind_group,
             instance_data,
-            // Defer intermediate texture creation to first draw call via ensure_intermediate_textures().
-            // This avoids panics when the device/surface is in an invalid state during initialization.
+            // Defer intermediate texture creation to the first frame that rasterizes
+            // paths, via ensure_intermediate_textures(). This avoids panics when the
+            // device/surface is in an invalid state during initialization, and keeps
+            // windows that never draw paths from allocating them at all.
             path_intermediate_texture: None,
             path_intermediate_view: None,
             path_msaa_texture: None,
@@ -1152,8 +1154,9 @@ impl WgpuRenderer {
                 .configure(&resources.device, &surface_config);
 
             // Invalidate intermediate textures - they will be lazily recreated
-            // in draw() after we confirm the surface is healthy. This avoids
-            // panics when the device/surface is in an invalid state during resize.
+            // by the next frame that rasterizes paths, once we have confirmed the
+            // surface is healthy. This avoids panics when the device/surface is in
+            // an invalid state during resize.
             resources.invalidate_intermediate_textures();
         }
     }
@@ -1326,9 +1329,6 @@ impl WgpuRenderer {
             }
         };
 
-        // Now that we know the surface is healthy, ensure intermediate textures exist
-        self.ensure_intermediate_textures();
-
         let frame_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1451,6 +1451,11 @@ impl WgpuRenderer {
                         }
 
                         drop(pass);
+                        // The path textures are window-sized, so they are only
+                        // allocated once a frame actually rasterizes paths. The
+                        // surface is known to be healthy by now, since a frame was
+                        // acquired above.
+                        self.ensure_intermediate_textures();
                         let rasterized = self.draw_paths_to_intermediate(
                             &mut encoder,
                             paths,
