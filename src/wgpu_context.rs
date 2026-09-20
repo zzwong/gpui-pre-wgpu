@@ -465,19 +465,15 @@ impl WgpuContext {
     }
 
     #[cfg(not(target_family = "wasm"))]
-<<<<<<< HEAD
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
-=======
-    pub fn instance(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> wgpu::Instance {
         Self::instance_with_backends(display, wgpu::Backends::VULKAN | wgpu::Backends::GL)
     }
 
     #[cfg(not(target_family = "wasm"))]
     pub fn instance_with_backends(
-        display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>,
+        display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
         backends: wgpu::Backends,
     ) -> wgpu::Instance {
->>>>>>> 0eba156 (gpui_wgpu: try Vulkan before initialising the GL backend on Linux)
         wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
             flags: wgpu::InstanceFlags::default(),

@@ -1422,7 +1422,6 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
-        self.ensure_intermediate_textures(size);
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
@@ -1530,6 +1529,11 @@ impl WgpuRendererCore {
                         }
 
                         drop(pass);
+                        // The path textures are window-sized, so they are only
+                        // allocated once a frame actually rasterizes paths. The
+                        // surface is known to be healthy by now, since a frame was
+                        // acquired above.
+                        self.ensure_intermediate_textures(size);
                         let rasterized = self.draw_paths_to_intermediate(
                             &mut encoder,
                             paths,
