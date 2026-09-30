@@ -1455,7 +1455,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color)
+        self.record_frame(scene, target_view, size, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1466,6 +1466,7 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
@@ -1529,10 +1530,7 @@ impl WgpuRendererCore {
                         }
 
                         drop(pass);
-                        // The path textures are window-sized, so they are only
-                        // allocated once a frame actually rasterizes paths. The
-                        // surface is known to be healthy by now, since a frame was
-                        // acquired above.
+                        // Allocate frame-sized path textures only when drawing paths.
                         self.ensure_intermediate_textures(size);
                         let rasterized = self.draw_paths_to_intermediate(
                             &mut encoder,
