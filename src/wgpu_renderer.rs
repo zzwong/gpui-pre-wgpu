@@ -2724,6 +2724,53 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn path_textures_are_allocated_only_when_paths_are_drawn() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let mut quads = Scene::default();
+        quads.insert_primitive(solid_quad(0., 0., 16., 16., gpui::blue()));
+        quads.finish();
+        renderer.render_scene_to_image(&quads, device_size(16, 16))?;
+        assert!(renderer.core.resources.path_intermediate_texture.is_none());
+        assert!(renderer.core.resources.path_msaa_texture.is_none());
+
+        let mut builder = gpui::PathBuilder::fill();
+        builder.move_to(gpui::point(gpui::px(2.), gpui::px(2.)));
+        builder.line_to(gpui::point(gpui::px(12.), gpui::px(2.)));
+        builder.line_to(gpui::point(gpui::px(12.), gpui::px(12.)));
+        builder.line_to(gpui::point(gpui::px(2.), gpui::px(12.)));
+        builder.close();
+        let mut path = builder.build()?.scale(1.);
+        path.color = gpui::red().into();
+        path.content_mask = ContentMask {
+            bounds: solid_quad(0., 0., 32., 24., gpui::red()).bounds,
+        };
+        let mut paths = Scene::default();
+        paths.insert_primitive(path);
+        paths.finish();
+
+        let texture_width = |renderer: &WgpuHeadlessRenderer| {
+            renderer
+                .core
+                .resources
+                .path_intermediate_texture
+                .as_ref()
+                .unwrap()
+                .width()
+        };
+        let image = renderer.render_scene_to_image(&paths, device_size(16, 16))?;
+        assert_pixel(&image, 4, 4, RED);
+        assert_eq!(texture_width(&renderer), 16);
+
+        renderer.render_scene_to_image(&quads, device_size(32, 24))?;
+        assert_eq!(texture_width(&renderer), 16);
+        let image = renderer.render_scene_to_image(&paths, device_size(32, 24))?;
+        assert_pixel(&image, 4, 4, RED);
+        assert_eq!(texture_width(&renderer), 32);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn headless_renderer_draws_quads_with_distinct_colors() -> anyhow::Result<()> {
         let mut renderer = WgpuHeadlessRenderer::new()?;
         let mut scene = Scene::default();
