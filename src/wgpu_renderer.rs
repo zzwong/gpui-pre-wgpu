@@ -2560,7 +2560,8 @@ where
     let mut errors = Vec::new();
     let mut without_hardware = Vec::new();
     for &backends in WgpuContext::backend_candidates() {
-        let instance = WgpuContext::instance_with_backends(Some(Box::new(window.clone())), backends);
+        let instance =
+            WgpuContext::instance_with_backends(Some(Box::new(window.clone())), backends);
         let surface = match create_surface(&instance, raw_window_handle) {
             Ok(surface) => surface,
             Err(e) => {
