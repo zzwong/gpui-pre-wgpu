@@ -1,24 +1,27 @@
 [package]
 name = "gpui-pre-wgpu"
-version = "0.3.3"
+version = "0.3.7"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
-description = "Zed's `gpui_wgpu` crate (gpui-pre snapshot of zed@5b055fa)"
+description = "Zed's `gpui_wgpu` crate (gpui-pre snapshot of zed@1a28cff)"
 repository = "https://github.com/zed-industries/zed"
 
 [package.metadata.gpui-pre]
 zed-crate = "gpui_wgpu"
 zed-version = "0.1.0"
-zed-rev = "5b055fa789a8b8d38ac951a6e0cde272f66b4495"
+zed-rev = "1a28cff4b409169bac058bca40dfbfeb7621d19b"
 
 [lib]
 path = "src/gpui_wgpu.rs"
+doctest = false
 name = "gpui_wgpu"
 
 [features]
 default = []
+bench-support = ["gpui/bench-support", "dep:image"]
 font-kit = ["dep:font-kit"]
+test-support = ["gpui/test-support", "dep:image"]
 
 [dependencies]
 gpui = { workspace = true }
@@ -28,6 +31,7 @@ collections = { workspace = true }
 cosmic-text = "0.19.0"
 etagere = { workspace = true }
 itertools = { workspace = true }
+image = { workspace = true, optional = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
 profiling = { workspace = true }
