@@ -302,25 +302,37 @@ impl WgpuRenderer {
             .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
 
-        // The surface must be created with the same instance that selected the
-        // adapter, otherwise wgpu will panic. The first window tries the backend
-        // candidates in turn; later windows reuse the shared context's instance.
+        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+            // Fall back to the display handle already provided via InstanceDescriptor::display.
+            raw_display_handle: None,
+            raw_window_handle: window_handle.as_raw(),
+        };
+
+        // Use the existing context's instance if available, otherwise create a new one.
+        // The surface must be created with the same instance that will be used for
+        // adapter selection, otherwise wgpu will panic.
+        let instance = gpu_context
+            .borrow()
+            .as_ref()
+            .map(|ctx| ctx.instance.clone())
+            .unwrap_or_else(|| WgpuContext::instance(Some(Box::new(window.clone()))));
+
+        // Safety: The caller guarantees that the window handle is valid for the
+        // lifetime of this renderer. In practice, the RawWindow struct is created
+        // from the native window handles and the surface is dropped before the window.
+        let surface = unsafe {
+            instance
+                .create_surface_unsafe(target)
+                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
+        };
+
         let mut ctx_ref = gpu_context.borrow_mut();
-        let (surface, context) = match ctx_ref.as_mut() {
+        let context = match ctx_ref.as_mut() {
             Some(context) => {
-                let surface = create_surface(&context.instance, window_handle.as_raw())?;
                 context.check_compatible_with_surface(&surface)?;
-                (surface, context)
+                context
             }
-            None => {
-                let (surface, context) = create_context_for_window(
-                    window,
-                    window_handle.as_raw(),
-                    compositor_gpu,
-                    true,
-                )?;
-                (surface, ctx_ref.insert(context))
-            }
+            None => ctx_ref.insert(WgpuContext::new(instance, &surface, compositor_gpu)?),
         };
 
         let atlas = Arc::new(WgpuAtlas::from_context(context));
@@ -1422,6 +1434,7 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
+        self.ensure_intermediate_textures(size);
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
@@ -1455,7 +1468,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, size, clear_color)
+        self.record_frame(scene, target_view, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1466,7 +1479,6 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
-        size: Size<DevicePixels>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
@@ -1530,8 +1542,6 @@ impl WgpuRendererCore {
                         }
 
                         drop(pass);
-                        // Allocate frame-sized path textures only when drawing paths.
-                        self.ensure_intermediate_textures(size);
                         let rasterized = self.draw_paths_to_intermediate(
                             &mut encoder,
                             paths,
@@ -2227,12 +2237,10 @@ impl WgpuRenderer {
             // may need more time to come back (e.g. after suspend/resume).
             std::thread::sleep(std::time::Duration::from_millis(350));
 
-            let (surface, new_context) = create_context_for_window(
-                window,
-                window_handle.as_raw(),
-                self.compositor_gpu,
-                false,
-            )?;
+            let instance = WgpuContext::instance(Some(Box::new(window.clone())));
+            let surface = create_surface(&instance, window_handle.as_raw())?;
+            let new_context =
+                WgpuContext::new_rejecting_software(instance, &surface, self.compositor_gpu)?;
             *gpu_context.borrow_mut() = Some(new_context);
             surface
         } else {
@@ -2312,6 +2320,9 @@ pub struct WgpuHeadlessRenderer {
 impl WgpuHeadlessRenderer {
     pub fn new() -> anyhow::Result<Self> {
         let (context, target_format) = WgpuContext::new_headless()?;
+        // The device may be shared with earlier renderers; observe only errors raised from
+        // here on, including any while this renderer builds its pipelines.
+        let observed_error_generation = context.errors().current_generation();
         let atlas = Arc::new(WgpuAtlas::from_context(&context));
         let core = WgpuRendererCore::new(
             &context,
@@ -2324,7 +2335,7 @@ impl WgpuHeadlessRenderer {
             context,
             core,
             render_target: None,
-            observed_error_generation: 0,
+            observed_error_generation,
         })
     }
 
@@ -2538,63 +2549,6 @@ fn instance_range(range: Range<usize>) -> Range<u32> {
     range.start as u32..range.end as u32
 }
 
-/// Creates the surface and GPU context for a window, trying each entry of
-/// [`WgpuContext::backend_candidates`] in order.
-///
-/// Every candidate first gets a chance to provide a hardware adapter, so a
-/// hardware GL adapter still wins over a CPU Vulkan implementation such as
-/// lavapipe. Software adapters are only accepted afterwards, and only when
-/// `allow_software` is set.
-#[cfg(not(target_family = "wasm"))]
-fn create_context_for_window<W>(
-    window: &W,
-    raw_window_handle: raw_window_handle::RawWindowHandle,
-    compositor_gpu: Option<CompositorGpuHint>,
-    allow_software: bool,
-) -> anyhow::Result<(wgpu::Surface<'static>, WgpuContext)>
-where
-    W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
-{
-    let mut errors = Vec::new();
-    let mut without_hardware = Vec::new();
-    for &backends in WgpuContext::backend_candidates() {
-        let instance =
-            WgpuContext::instance_with_backends(Some(Box::new(window.clone())), backends);
-        let surface = match create_surface(&instance, raw_window_handle) {
-            Ok(surface) => surface,
-            Err(e) => {
-                errors.push(format!("{backends:?}: {e:#}"));
-                continue;
-            }
-        };
-        match WgpuContext::new_rejecting_software(instance.clone(), &surface, compositor_gpu) {
-            Ok(context) => return Ok((surface, context)),
-            Err(e) => {
-                log::info!("No hardware {backends:?} adapter can drive the surface: {e:#}");
-                errors.push(format!("{backends:?}: {e:#}"));
-                without_hardware.push((backends, instance, surface));
-            }
-        }
-    }
-    if allow_software {
-        for (backends, instance, surface) in without_hardware {
-            match WgpuContext::new(instance, &surface, compositor_gpu) {
-                Ok(context) => {
-                    log::warn!(
-                        "No hardware GPU adapter found; using a software {backends:?} adapter"
-                    );
-                    return Ok((surface, context));
-                }
-                Err(e) => errors.push(format!("{backends:?} (software): {e:#}")),
-            }
-        }
-    }
-    anyhow::bail!(
-        "No GPU adapter found that can configure the display surface: {}",
-        errors.join("; ")
-    )
-}
-
 #[cfg(not(target_family = "wasm"))]
 fn create_surface(
     instance: &wgpu::Instance,
@@ -2719,53 +2673,6 @@ mod tests {
     const BLUE: [u8; 4] = [0, 0, 255, 255];
     #[cfg(target_os = "linux")]
     const BLACK: [u8; 4] = [0, 0, 0, 255];
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn path_textures_are_allocated_only_when_paths_are_drawn() -> anyhow::Result<()> {
-        let mut renderer = WgpuHeadlessRenderer::new()?;
-        let mut quads = Scene::default();
-        quads.insert_primitive(solid_quad(0., 0., 16., 16., gpui::blue()));
-        quads.finish();
-        renderer.render_scene_to_image(&quads, device_size(16, 16))?;
-        assert!(renderer.core.resources.path_intermediate_texture.is_none());
-        assert!(renderer.core.resources.path_msaa_texture.is_none());
-
-        let mut builder = gpui::PathBuilder::fill();
-        builder.move_to(gpui::point(gpui::px(2.), gpui::px(2.)));
-        builder.line_to(gpui::point(gpui::px(12.), gpui::px(2.)));
-        builder.line_to(gpui::point(gpui::px(12.), gpui::px(12.)));
-        builder.line_to(gpui::point(gpui::px(2.), gpui::px(12.)));
-        builder.close();
-        let mut path = builder.build()?.scale(1.);
-        path.color = gpui::red().into();
-        path.content_mask = ContentMask {
-            bounds: solid_quad(0., 0., 32., 24., gpui::red()).bounds,
-        };
-        let mut paths = Scene::default();
-        paths.insert_primitive(path);
-        paths.finish();
-
-        let texture_width = |renderer: &WgpuHeadlessRenderer| {
-            renderer
-                .core
-                .resources
-                .path_intermediate_texture
-                .as_ref()
-                .unwrap()
-                .width()
-        };
-        let image = renderer.render_scene_to_image(&paths, device_size(16, 16))?;
-        assert_pixel(&image, 4, 4, RED);
-        assert_eq!(texture_width(&renderer), 16);
-
-        renderer.render_scene_to_image(&quads, device_size(32, 24))?;
-        assert_eq!(texture_width(&renderer), 16);
-        let image = renderer.render_scene_to_image(&paths, device_size(32, 24))?;
-        assert_pixel(&image, 4, 4, RED);
-        assert_eq!(texture_width(&renderer), 32);
-        Ok(())
-    }
 
     #[cfg(target_os = "linux")]
     #[test]
