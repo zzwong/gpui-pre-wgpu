@@ -1212,7 +1212,10 @@ impl WgpuRendererCore {
                 .max_buffer_size
                 .min(device.limits().max_storage_buffer_binding_size)
                 .min(MAX_INSTANCE_BUFFER_SIZE);
-            let initial_capacity = (2 * 1024 * 1024).min(max_buffer_size);
+            // Starts at 1 MiB and grows on demand. A 2 MiB start leaves the
+            // allocator's first 8 MiB block a few kilobytes short of holding a
+            // window-sized depth texture, which then gets a 16 MiB block to itself.
+            let initial_capacity = (1024 * 1024).min(max_buffer_size);
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("instance_buffer"),
                 size: initial_capacity,
